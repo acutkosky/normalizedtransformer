@@ -1,4 +1,4 @@
-# attention preserves L1 norm...
+# a truly amazing deep learning experiment!!!
 
 To setup on SCC, first load modules:
 
