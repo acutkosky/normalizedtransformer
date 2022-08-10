@@ -1,0 +1,7 @@
+torchtext
+transformers
+pillow
+transformers
+matplotlib
+torchdata
+tqdm
