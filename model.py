@@ -5,14 +5,16 @@ implements a simple self-attention layer with some custom stuff.
 
 import torch
 from torch.nn import functional as F
+import condnorm
 
 class ModelConfig:
-    def __init__(self, vocab_size, context_length, n_layers, embedding_dim, n_heads=1, **kwargs):
+    def __init__(self, vocab_size, context_length, n_layers, embedding_dim, n_heads=1, use_diag=True, **kwargs):
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.context_length = context_length
         self.n_heads = n_heads
         self.n_layers = n_layers
+        self.use_diag = use_diag
         for k,v in kwargs.items():
             setattr(self, k, v)
 
@@ -22,7 +24,9 @@ class SelfAttention(torch.nn.Module):
         self.config = config
         self.dim = config.embedding_dim
         self.key_matrix = torch.nn.Linear(self.dim, self.dim) # maybe we want to mess with initialization schemes later?
-        self.query_matrix = torch.nn.Linear(self.dim, self.dim)
+        self.query_matrix = torch.nn.Identity()#torch.nn.Linear(self.dim, self.dim)
+
+        self.value_matrix = torch.nn.Linear(self.dim, self.dim)
         
         self.n_heads = config.n_heads
         self.context_length = config.context_length
@@ -41,7 +45,7 @@ class SelfAttention(torch.nn.Module):
         split_heads_shape = x.shape[:-1] + (self.n_heads, self.dim // self.n_heads)
         key = self.key_matrix(x).reshape(split_heads_shape).transpose(-2, -3) # [..., T, C] -> [..., T, nh, hs] -> [..., nh, T, hs]
         query = self.query_matrix(x).reshape(split_heads_shape).transpose(-2, -3) # [..., T, C] -> [..., T, nh, hs] -> [..., nh, T, hs]
-        value = x.reshape(split_heads_shape).transpose(-2, -3) # [..., T, C] -> [..., T, nh, hs] -> [..., nh, T, hs]
+        value = self.value_matrix(x).reshape(split_heads_shape).transpose(-2, -3) # [..., T, C] -> [..., T, nh, hs] -> [..., nh, T, hs]
 
         assert key.shape[-2] == T, "shape mismatch: {}".format(key.shape)
 
@@ -65,12 +69,20 @@ class SelfAttention(torch.nn.Module):
 class ResidualSelfAttention(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
         self.selfattention = SelfAttention(config)
-        self.register_parameter("residual_weight", torch.nn.Parameter(torch.tensor(1.0)))
+        self.diagnorm = condnorm.DiagNorm(momentum=0.0001, ignore_dims=[1])
+        self.ln = torch.nn.LayerNorm(config.embedding_dim)
+        self.scaling = torch.nn.Parameter(torch.zeros(1))
+        # self.register_parameter("residual_weight", 
+        # self.residual_weight = torch.nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x):
-        y = self.selfattention(x)
-        y = x*(1-self.residual_weight) + self.residual_weight*y
+        if self.config.use_diag == 'true':
+            y = self.diagnorm(x)
+        y = self.ln(x)
+        y = self.selfattention(y)
+        y = x + y#*self.scaling#*(1-self.residual_weight) + self.residual_weight*y
         return y
 
 
@@ -82,6 +94,9 @@ class StackedAttention(torch.nn.Module):
         self.tok_embeddings = torch.nn.Embedding(config.vocab_size, config.embedding_dim)
         self.pos_embeddings = torch.nn.Parameter(torch.zeros(1, config.context_length, config.embedding_dim))
         self.head = torch.nn.Linear(config.embedding_dim, config.vocab_size)
+        with torch.no_grad():
+            self.head.weight.mul_(0.0)
+            self.head.bias.mul_(0.0)
 
 
     def get_targets(mask, idx, T):

@@ -5,3 +5,5 @@ transformers
 matplotlib
 torchdata
 tqdm
+einops
+datasets
