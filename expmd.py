@@ -61,7 +61,7 @@ class ExpMD(torch.optim.Optimizer):
                 offset = param - state['center']
                 
 
-                state['second_order'].add_(grad**2)# * torch.abs(offset))
+                state['second_order'].add_(grad**2 * torch.abs(offset))
                 # state['second_order'].add_(grad**2 * (1-beta))# * torch.abs(offset))
                 # state['second_order'].mul_(beta)
 
