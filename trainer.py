@@ -13,6 +13,8 @@ import perpopt
 import expmd
 from datasets import load_dataset, load_from_disk
 
+import wandb
+
 parser = argparse.ArgumentParser(description='Simple pretraining thing')
 
 # parser.add_argument('--logdir', default='./runs/', help='Tensorboard logdir')
@@ -114,7 +116,12 @@ def train(model, config, device):
             running_loss += (loss.item() - running_loss)/min(t+1.0, 1000.0)
             running_accuracy += (accuracy.item() - running_accuracy)/min(t+1.0, 1000.0)
 
-            losses.append(loss.item())
+            # losses.append(loss.item())
+            wandb.log({
+                "epoch": epoch,
+                "train/loss": loss.item(),
+                "train/accuracy": accuracy.item()
+            })
             pbar.set_description(f"train epoch {epoch+1} iter {t}: train loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
 
             for _ in range(config.ministeps-1):
@@ -177,6 +184,11 @@ def test(model, config, device, epoch):
         running_accuracy += (accuracy.item() - running_accuracy)/(t+1.0)
 
         losses.append(loss.item())
+        wandb.log({
+            "test/loss": loss.item(),
+            "test/accuracy": accuracy.item()
+        },
+        commit=False)
         pbar.set_description(f"test epoch {epoch+1} iter {t}: train loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
 
     return losses
@@ -212,17 +224,19 @@ def initialize_and_train_model(args):
 
     losses = train(attention_model, train_config, device)
 
-    plt.plot(losses)
-    plt.xlabel('iterations')
-    plt.ylabel('loss')
-    plt.title('Loss of awesome model!')
+    # plt.plot(losses)
+    # plt.xlabel('iterations')
+    # plt.ylabel('loss')
+    # plt.title('Loss of awesome model!')
 
-    plt.savefig(args.save_path)
+    # plt.savefig(args.save_path)
 
     
 
 if __name__=='__main__':
     args = parser.parse_args()
+    wandb.init()
+    wandb.config.update(args)
     initialize_and_train_model(args)
 
 

@@ -1,10 +1,10 @@
 import torch
 from torch.optim import Optimizer
 import sys
-
+import random
+import wandb
 
 SMALL_VALUE = 1e-8
-
 
 
 class ExpMD(torch.optim.Optimizer):
@@ -13,6 +13,8 @@ class ExpMD(torch.optim.Optimizer):
         super().__init__(params, {'lr': lr, 'wd': wd, 'eps': eps, 'beta': beta})
         self.center = center
         self.momentum = momentum
+        self.count = 0
+        self.names = {}
         self.__setstate__(self.state)
 
 
@@ -48,6 +50,7 @@ class ExpMD(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
+        self.count += 1
 
         for group in self.param_groups:
             lr = group['lr']
@@ -73,7 +76,7 @@ class ExpMD(torch.optim.Optimizer):
 
                 path_length_ratio = torch.sqrt(torch.abs(offset) + state['path_length'])#/(torch.abs(param) + SMALL_VALUE))
 
-                eta =  lr * torch.minimum(path_length_ratio/torch.sqrt(state['second_order']), 0.5/(torch.abs(grad) + SMALL_VALUE))
+                eta =  torch.minimum(path_length_ratio/torch.sqrt(state['second_order']), 0.5/(torch.abs(grad) + SMALL_VALUE))
 
                 # compute the MD update with regularizer \psi(w) = eps/eta (w/eps + 1) log(w/eps +1) - w/eta
                 # and composite term \phi(w) = eta * g^2 |w|
@@ -89,7 +92,29 @@ class ExpMD(torch.optim.Optimizer):
                 state['anchor'].add_(path_delta_threshold * (new_offset - state['anchor']))
 
 
-                state['path_length'].add_(path_delta * path_delta_threshold)
+                # state['path_length'].add_(path_delta * path_delta_threshold)
+                state['path_length'].add_(lr * torch.abs(new_offset - offset))
+
+                #ok we just be random
+                if param not in self.names:
+                    if param.name is None:
+                        self.names[param] = str(random.random())[2:]
+                    else:
+                        self.names[param] = param.name
+
+                name = self.names[param]
+
+                if self.count % 200 == 0:
+                    wandb.log(
+                        {
+                            # f"weight_histograms/{name}": torch.abs(param),
+                            # f"path_histograms/{name}": state['path_length'],
+                            f"eta/{name}": eta,
+                            f"etagrad/{name}": torch.abs(eta*grad),
+                            f"wd/{name}": grad**2 * eta**2 + wd,
+                        },
+                        commit=False
+                    )
 
                 # state['path_length'].add_(lr * torch.abs(new_offset - offset))
 
@@ -112,7 +137,7 @@ class ExpMD(torch.optim.Optimizer):
 
 class ExpMDNorm(torch.optim.Optimizer):
 
-    def __init__(self, params, lr, eps=0.01, wd=0.0, beta=0.99, center=True, momentum=True):
+    def __init__(self, params, lr, eps=0.01, wd=0.0, beta=0.99, center=True, momentum=False):
         super().__init__(params, {'lr': lr, 'wd': wd, 'eps': eps, 'beta': beta})
         self.center = center
         self.momentum = momentum
@@ -173,7 +198,7 @@ class ExpMDNorm(torch.optim.Optimizer):
                 # state['second_order'].add_(torch.norm(grad)**2 * (1-beta))# * torch.abs(offset))
                 # state['second_order'].mul_(beta)
 
-                path_length_ratio = 1.0#lr#torch.sqrt(torch.norm(offset) + lr * state['path_length'])#/(torch.abs(param) + SMALL_VALUE))
+                path_length_ratio = lr#torch.sqrt(torch.norm(offset) + lr * state['path_length'])#/(torch.abs(param) + SMALL_VALUE))
 
                 eta = torch.minimum(path_length_ratio/torch.sqrt(state['second_order'] + SMALL_VALUE), 0.5/(torch.norm(grad) + SMALL_VALUE))
 
