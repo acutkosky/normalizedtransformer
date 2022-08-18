@@ -7,3 +7,4 @@ torchdata
 tqdm
 einops
 datasets
+wandb

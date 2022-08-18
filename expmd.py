@@ -9,7 +9,7 @@ SMALL_VALUE = 1e-8
 
 class ExpMD(torch.optim.Optimizer):
 
-    def __init__(self, params, lr, eps=0.01, wd=0.0, beta=0.99, momentum=False, center=False):
+    def __init__(self, params, lr, eps=0.01, wd=0.0, beta=0.99, momentum=True, center=True):
         super().__init__(params, {'lr': lr, 'wd': wd, 'eps': eps, 'beta': beta})
         self.center = center
         self.momentum = momentum
@@ -17,6 +17,17 @@ class ExpMD(torch.optim.Optimizer):
         self.names = {}
         self.__setstate__(self.state)
 
+
+    def reset(self, state, param):
+        state = self.state[param]
+        state['second_order'] = torch.full_like(param, SMALL_VALUE)
+        state['anchor'] = torch.clone(param).detach()
+        # state['path_length'] = torch.zeros(1, device=param.device)
+        state['path_length'] = torch.full_like(param, SMALL_VALUE)
+        if self.center:
+            state['center'] = torch.clone(param).detach()
+        else:
+            state['center'] = 0.0
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -27,6 +38,7 @@ class ExpMD(torch.optim.Optimizer):
                 state['anchor'] = torch.clone(param).detach()
                 # state['path_length'] = torch.zeros(1, device=param.device)
                 state['path_length'] = torch.full_like(param, SMALL_VALUE)
+                state['momentum'] = torch.zeros_like(param)
                 if self.center:
                     state['center'] = torch.clone(param).detach()
                 else:
@@ -63,20 +75,27 @@ class ExpMD(torch.optim.Optimizer):
 
                 grad = param.grad
 
+
                 state = self.state[param]
 
+
+
+                state['momentum'].add_(grad * (1-beta)/beta)
+                state['momentum'].mul_(beta)
+
+                grad = state['momentum']
                 offset = param - state['center']
                 
 
-                state['second_order'].add_(grad**2 * torch.abs(offset))
+                # state['second_order'].add_(grad**2 * torch.abs(offset))
                 # state['second_order'].add_(grad**2 * (1-beta))# * torch.abs(offset))
                 # state['second_order'].mul_(beta)
 
-                # state['second_order'].add_(grad**2)
+                state['second_order'].add_(grad**2)
 
-                path_length_ratio = torch.sqrt(torch.abs(offset) + state['path_length'])#/(torch.abs(param) + SMALL_VALUE))
+                path_length_ratio = 1.0#torch.sqrt(torch.abs(offset) + state['path_length'])#/(torch.abs(param) + SMALL_VALUE))
 
-                eta =  torch.minimum(path_length_ratio/torch.sqrt(state['second_order']), 0.5/(torch.abs(grad) + SMALL_VALUE))
+                eta =  lr * torch.minimum(path_length_ratio/torch.sqrt(state['second_order']), 0.5/(torch.abs(grad) + SMALL_VALUE))
 
                 # compute the MD update with regularizer \psi(w) = eps/eta (w/eps + 1) log(w/eps +1) - w/eta
                 # and composite term \phi(w) = eta * g^2 |w|
@@ -93,7 +112,7 @@ class ExpMD(torch.optim.Optimizer):
 
 
                 # state['path_length'].add_(path_delta * path_delta_threshold)
-                state['path_length'].add_(lr * torch.abs(new_offset - offset))
+                state['path_length'].add_( torch.abs(new_offset - offset))
 
                 #ok we just be random
                 if param not in self.names:
@@ -104,17 +123,19 @@ class ExpMD(torch.optim.Optimizer):
 
                 name = self.names[param]
 
-                if self.count % 200 == 0:
-                    wandb.log(
-                        {
-                            # f"weight_histograms/{name}": torch.abs(param),
-                            # f"path_histograms/{name}": state['path_length'],
-                            f"eta/{name}": eta,
-                            f"etagrad/{name}": torch.abs(eta*grad),
-                            f"wd/{name}": grad**2 * eta**2 + wd,
-                        },
-                        commit=False
-                    )
+
+
+                # if self.count % 200 == 0:
+                #     wandb.log(
+                #         {
+                #             # f"weight_histograms/{name}": torch.abs(param),
+                #             # f"path_histograms/{name}": state['path_length'],
+                #             f"eta/{name}": eta,
+                #             f"etagrad/{name}": torch.abs(eta*grad),
+                #             f"wd/{name}": grad**2 * eta**2 + wd,
+                #         },
+                #         commit=False
+                #     )
 
                 # state['path_length'].add_(lr * torch.abs(new_offset - offset))
 
@@ -126,8 +147,6 @@ class ExpMD(torch.optim.Optimizer):
                 param.copy_(new_offset +state['center'])
 
                 
-
-
 
 
 
