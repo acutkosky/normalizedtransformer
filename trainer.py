@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 from model import StackedAttention, ModelConfig
 import perpopt
 import expmd
+import nigt
 from datasets import load_dataset, load_from_disk
 
 import wandb
@@ -20,6 +21,7 @@ parser = argparse.ArgumentParser(description='Simple pretraining thing')
 # parser.add_argument('--logdir', default='./runs/', help='Tensorboard logdir')
 parser.add_argument('--save_path', default='awesomeplot.png', help='where to save data')
 parser.add_argument('--learning_rate', '-lr', type=float, default=6e-4)
+parser.add_argument('--beta', type=float, default=0.99)
 parser.add_argument('--eps', '-eps', type=float, default=6e-4)
 parser.add_argument('--n_layers', type=int, default=12)
 parser.add_argument('--n_heads', type=int, default=1)
@@ -28,7 +30,10 @@ parser.add_argument('--epochs', type=int, default=10)
 parser.add_argument('--ministeps', type=int, default=1)
 parser.add_argument('--weight_decay', '-wd', type=float, default=0.0)
 parser.add_argument('--use_diag', '-diag', type=str, default='true')
-parser.add_argument('--opt', '-opt', type=str, default='adamw', choices=['adamw', 'perpopt', 'expmd', 'expmdnorm'])
+parser.add_argument('--recenter', type=str, default='true')
+parser.add_argument('--implicit', type=str, default='true')
+parser.add_argument('--opt', '-opt', type=str, default='adamw', choices=['adamw', 'perpopt', 'expmd',
+                                    'expmdnorm', 'nigt', 'dynamic', 'nigt_lamb', 'dynamic_reg', 'dynamic_reg_reset'])
 
 
 args = parser.parse_args()
@@ -54,12 +59,24 @@ def train(model, config, device):
     if config.opt == 'adamw':
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.wd)
     elif config.opt == 'perpopt':
-        optimizer = perpopt.PerpOpt(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=0.9, alignbeta=1.0)
+        optimizer = perpopt.PerpOpt(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=config.beta, alignbeta=1.0)
     elif config.opt == 'expmd':
         optimizer = expmd.ExpMD(model.parameters(), lr=config.learning_rate, wd=config.wd, eps=config.eps)
     elif config.opt == 'expmdnorm':
         optimizer = expmd.ExpMDNorm(model.parameters(), lr=config.learning_rate, wd=config.wd, eps=config.eps)
+    elif config.opt == 'nigt':
+        optimizer = nigt.Nigt(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=config.beta)
+    elif config.opt == 'nigt_lamb':
+        optimizer = nigt.Nigt(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=config.beta)
+    elif config.opt == 'dynamic':
+        optimizer = nigt.Dynamic(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=config.beta, implicit=config.implicit)
+    elif config.opt == 'dynamic_reg':
+        optimizer = nigt.Dynamic_reg(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=config.beta, implicit=config.implicit)
+    elif config.opt == 'dynamic_reg_reset':
+        optimizer = nigt.Dynamic_reg_reset(model.parameters(), lr=config.learning_rate, wd=config.wd, beta=config.beta, implicit=config.implicit)
     losses = []
+
+    iterations = 0
 
     for epoch in range(config.epochs):
         ds_path = f"data/manual_saves/wikitext-2-v1/bs-{config.batch_size}-ml-{model.config.context_length}-train"
@@ -97,6 +114,8 @@ def train(model, config, device):
         pbar = tqdm(enumerate(loader))#, total=len(loader))
         running_loss = 0.0
         running_accuracy = 0.0
+        epoch_train_loss = 0.0
+        epoch_train_accuracy = 0.0
         last_time = time.monotonic()
 
         for t, strings in pbar:
@@ -114,14 +133,20 @@ def train(model, config, device):
             delta_time = current_time - last_time
             last_time = current_time
             running_loss += (loss.item() - running_loss)/min(t+1.0, 1000.0)
+            epoch_train_loss += (loss.item() - epoch_train_loss)/(t+1.0)
             running_accuracy += (accuracy.item() - running_accuracy)/min(t+1.0, 1000.0)
+            epoch_train_accuracy += (accuracy.item() - epoch_train_accuracy)/(t+1.0)
 
             # losses.append(loss.item())
-            wandb.log({
-                "epoch": epoch,
-                "train/loss": loss.item(),
-                "train/accuracy": accuracy.item()
-            })
+            iterations += 1
+            if iterations % 100 == 0:
+                wandb.log({
+                    "epoch": epoch,
+                    "train/loss": loss.item(),
+                    "train/accuracy": accuracy.item(),
+                    "it_per_second": 1.0/delta_time
+                },
+                step = iterations)
             pbar.set_description(f"train epoch {epoch+1} iter {t}: train loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
 
             for _ in range(config.ministeps-1):
@@ -129,15 +154,23 @@ def train(model, config, device):
                 features, loss, accuracy = model(idx, mask)
                 loss.backward()
                 optimizer.step()
-
+        wandb.log({
+            "train/epoch_loss": epoch_train_loss,
+            "train/epoch_accuracy": epoch_train_accuracy
+        },
+        step = iterations)
         print("testing:")
-        test(model, config, device, epoch)
+        if config.opt == 'nigt' and config.recenter:
+            optimizer.x_to_w_()
+        test(model, config, device, epoch, iterations)
+        if config.opt == 'nigt' and config.recenter:
+            optimizer.w_to_x_()
 
     return losses
 
 
 
-def test(model, config, device, epoch):
+def test(model, config, device, epoch, iterations):
     tokenizer = transformers.GPT2TokenizerFast.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
     losses = []
@@ -185,10 +218,10 @@ def test(model, config, device, epoch):
 
         losses.append(loss.item())
         wandb.log({
-            "test/loss": loss.item(),
-            "test/accuracy": accuracy.item()
+            "test/loss": running_loss,
+            "test/accuracy": running_accuracy
         },
-        commit=False)
+        step=iterations)
         pbar.set_description(f"test epoch {epoch+1} iter {t}: train loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
 
     return losses
@@ -214,6 +247,9 @@ def initialize_and_train_model(args):
         opt=args.opt,
         ministeps=args.ministeps,
         eps=args.eps,
+        recenter=(args.recenter == 'true'),
+        beta=args.beta,
+        implicit=(args.implicit == 'true')
     )
 
     device = 'cpu'
