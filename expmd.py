@@ -106,6 +106,8 @@ class ExpMD(torch.optim.Optimizer):
 
                 new_offset = torch.sign(x) * eps * (torch.exp(torch.abs(x)) - 1)
 
+                new_offset = offset * torch.exp(-eta * grad * torch.sign(offset))
+
                 path_delta = torch.abs(new_offset - state['anchor'])
                 path_delta_threshold = path_delta > lr
                 state['anchor'].add_(path_delta_threshold * (new_offset - state['anchor']))
@@ -147,6 +149,7 @@ class ExpMD(torch.optim.Optimizer):
                 param.copy_(new_offset +state['center'])
 
                 
+
 
 
 
