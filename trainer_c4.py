@@ -96,7 +96,7 @@ def train(model, config, device):
     elif config.opt == 'random':
         optimizer = nigt.RandomSGDM(model.parameters(), lr=config.lr, wd=config.wd, beta=config.beta, scale_type=config.scale_type)
     elif config.opt == 'randomol':
-        optimizer = online_opt.RandomOL(model.parameters(), lr=config.lr, wd=config.wd, scale_type=config.scale_type, ol=config.ol, beta=config.beta ,beta2=config.beta2)
+        optimizer = online_opt.RandomOL(model.parameters(), lr=config.lr, wd=config.wd, scale_type=config.scale_type, ol=config.ol, beta=config.beta ,beta2=config.beta2, logger=wandb)
     elif config.opt == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, momentum=config.beta, dampening=config.beta)
     losses = []
@@ -172,7 +172,10 @@ def train(model, config, device):
         print("testing:")
         if config.opt == 'nigt' and config.recenter:
             optimizer.x_to_w_()
-        test(model, config, device, epoch, iterations, test_iter)
+        _, finished = test(model, config, device, epoch, iterations, test_iter)
+        if not finished and conf.dataset == 'c4':
+            test_loader = load_test_data(config, tokenizer)
+            test_iter = enumerate(test_loader)
         if config.opt == 'nigt' and config.recenter:
             optimizer.w_to_x_()
 
@@ -221,7 +224,7 @@ def test(model, config, device, epoch, iterations, test_iter=None):
     running_accuracy = 0.0
     last_time = time.monotonic()
     cur_run_it = 0
-
+    finished = False
     for t, strings in pbar:
         # encoded = tokenizer(strings, padding=True, truncation=True, return_tensors='pt', max_length=model.config.context_length)
         idx = strings['input_ids'].to(device)
@@ -245,9 +248,10 @@ def test(model, config, device, epoch, iterations, test_iter=None):
         step=iterations)
         pbar.set_description(f"test epoch {epoch+1} iter {t}: current loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
         if (t+1) % total == 0:
+            finished = True
             break
 
-    return losses
+    return losses, finished
 
 
 

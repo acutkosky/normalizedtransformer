@@ -16,8 +16,13 @@ class OL_BASE(object):
     def get_iterate(self):
         raise NotImplementedError
     
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         raise NotImplementedError
+    def get_logging_info(self, logging_info):
+        return None
+    
+    def global_update(self, param, grad, local_states):
+        return None
 
 
 
@@ -35,7 +40,7 @@ class OGD(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.iterate.sub_(self.lr*(1.0-self.beta)*grad/self.beta)
         self.iterate.mul_(self.beta)
 
@@ -53,7 +58,7 @@ class OPTIMISTIC_OGD(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.iterate.sub_(self.lr*(1.0-self.beta)*grad/self.beta)
         self.iterate.mul_(self.beta)
         self.opt_iterate.copy_(self.iterate*self.beta - self.lr* (1.0-self.beta)*grad)
@@ -80,7 +85,7 @@ class SCALE_ADAM(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
 
         # metag = torch.sum(grad * self.iterate)/self.scaling
         metag = -torch.sum(grad * self.m * torch.rsqrt(self.V + SMALL_VALUE))
@@ -114,6 +119,201 @@ class SCALE_ADAM(OL_BASE):
 
 
 
+class SCALE_ADAM_CLIP(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+        self.scaling = torch.ones(1, device=initial_value.device) * self.lr
+        self.scale_V = torch.zeros(1, device=initial_value.device)
+        self.scale_eta = self.lr
+        self.count = 0
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+
+        # metag = torch.sum(grad * self.iterate)/self.scaling
+        metag = -torch.sum(grad * self.m * torch.rsqrt(self.V + SMALL_VALUE))
+        # assert torch.abs(metag_p- metag)<0.001, f"uh oh: {metag_p}, {metag}"
+
+
+        self.count += 1
+
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+
+        V = self.V#/(1.0-self.beta2**self.count)
+        m = self.m#/(1.0-self.beta**self.count)
+
+        # self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        # self.V.mul_(self.beta2)
+        # self.m.add_((1.0-self.beta) * grad / self.beta)
+        # self.m.mul_(self.beta)
+        # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+        
+        self.scale_V.mul_(self.beta2)
+        self.scale_V.add_(metag**2)
+        
+
+        self.scaling.mul_(torch.exp(-metag * torch.rsqrt(self.scale_V+SMALL_VALUE) - metag**2 /(self.scale_V + SMALL_VALUE)))
+        self.scaling.clamp_(1e-10, 0.1)
+        # eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
+        self.iterate.copy_(-self.scaling* m * torch.rsqrt(V + SMALL_VALUE))
+#############
+
+
+
+class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+        self.scaling = torch.ones(1, device=initial_value.device) * self.lr
+        self.scale_V = torch.zeros(1, device=initial_value.device)
+        self.scale_eta = self.lr
+        self.count = 0
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+
+        # metag = torch.sum(grad * self.iterate)/self.scaling
+        metag = -torch.sum(grad * self.m * torch.rsqrt(self.V + SMALL_VALUE))
+        return metag
+
+    def get_logging_info(self, logging_info):
+        return {'optimizer/learned_lr': self.scaling}
+
+
+    @torch.no_grad()
+    def global_update(self, param, grad, local_states):
+        metag = 0
+        for k, v in local_states.items():
+            metag += v
+        # assert torch.abs(metag_p- metag)<0.001, f"uh oh: {metag_p}, {metag}"
+
+
+        self.count += 1
+
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+
+        V = self.V#/(1.0-self.beta2**self.count)
+        m = self.m#/(1.0-self.beta**self.count)
+
+        # self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        # self.V.mul_(self.beta2)
+        # self.m.add_((1.0-self.beta) * grad / self.beta)
+        # self.m.mul_(self.beta)
+        # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+        
+        self.scale_V.mul_(self.beta2)
+        self.scale_V.add_(metag**2)
+        
+
+        self.scaling.mul_(torch.exp(-metag * torch.rsqrt(self.scale_V+SMALL_VALUE) - metag**2 /(self.scale_V + SMALL_VALUE)))
+        self.scaling.clamp_(1e-10, 0.1)
+        # logger.log({
+        #     'optimizer/iterate': self.scaling,
+        # },
+        # commit=False)
+        # eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
+        self.iterate.copy_(-self.scaling* m * torch.rsqrt(V + SMALL_VALUE))
+#############
+
+
+
+
+
+
+class SCALE_ADAM_MANYLR(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+        self.num_lrs = 8
+
+        self.scaling_lrs = [10**-k for k in range(self.num_lrs)]
+        self.scaling = [torch.ones(1, device=initial_value.device) * self.lr/self.num_lrs * s for s in self.scaling_lrs]
+        self.lower_bound = self.lr/self.num_lrs * 0.1
+
+        self.scale_V = torch.zeros(1, device=initial_value.device)
+        self.scale_eta = self.lr
+        self.count = 0
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+
+        # metag = torch.sum(grad * self.iterate)/self.scaling
+        metag = -torch.sum(grad * self.m * torch.rsqrt(self.V + SMALL_VALUE))
+        # assert torch.abs(metag_p- metag)<0.001, f"uh oh: {metag_p}, {metag}"
+
+
+        self.count += 1
+
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+
+        V = self.V#/(1.0-self.beta2**self.count)
+        m = self.m#/(1.0-self.beta**self.count)
+
+        # self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        # self.V.mul_(self.beta2)
+        # self.m.add_((1.0-self.beta) * grad / self.beta)
+        # self.m.mul_(self.beta)
+        # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+        s_lr_base = torch.rsqrt(self.scale_V+SMALL_VALUE)
+        for s_lr, s in zip(self.scaling_lrs, self.scaling):
+            s_eta = s_lr*s_lr_base
+            s.mul_(torch.exp(-metag * s_eta - metag**2 *s_eta**2))
+            s.clamp_(self.lower_bound, s_lr* self.lr/self.num_lrs * 10)
+
+        self.scale_V.mul_(self.beta2)
+        self.scale_V.add_(metag**2)
+        
+
+        self.scaling.mul_(torch.exp(-metag * torch.rsqrt(self.scale_V+SMALL_VALUE) - metag**2 /(self.scale_V + SMALL_VALUE)))
+        # eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
+        self.iterate.copy_(-self.scaling* m * torch.rsqrt(V + SMALL_VALUE))
+#############
+
+
+
 class SCALE_ADAM_DIAG(OL_BASE):
     def __init__(self, initial_value, **kwargs):
         super().__init__(name='adam')
@@ -135,7 +335,7 @@ class SCALE_ADAM_DIAG(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
 
         # metag = torch.sum(grad * self.iterate)/self.scaling
         metag = -grad * self.m * torch.rsqrt(self.V + SMALL_VALUE)
@@ -184,7 +384,7 @@ class OPTIMISTIC_CONSTRAINED_ADAGRAD(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.V.add_((self.h - grad)**2*(1.0-self.beta)/self.beta)
         self.h.copy_(grad)
         self.V.mul_(self.beta)
@@ -213,7 +413,7 @@ class CONSTRAINED_L2_ADAGRAD(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         if torch.linalg.norm(self.iterate) > self.lr and torch.sum(grad * self.iterate)<0:
             grad.sub_(torch.sum(grad * self.iterate) * normalize(self.iterate))
         self.V.add_(grad**2*(1.0-self.beta)/self.beta)
@@ -237,7 +437,7 @@ class CONSTRAINED_ADAGRAD(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.V.add_( grad**2*(1.0-self.beta)/self.beta)
         self.V.mul_(self.beta)
         self.sum_G.add_( grad*(1.0-self.beta)/self.beta)
@@ -269,7 +469,7 @@ class REWARD_RESET(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.count += 1
         self.reward.add_(torch.sum(self.iterate * grad))
         if self.reward<-4*np.sqrt(2)*self.lr*torch.sum(torch.sqrt(self.V + grad**2)):
@@ -315,7 +515,7 @@ class REWARD_RESET_CB(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad,  *args, **kwargs):
         self.count += 1
         self.reward.add_(torch.sum(self.iterate * grad))
         # size = torch.
@@ -372,7 +572,7 @@ class REWARD_RESET_PF(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.count += 1
         self.max_G = torch.maximum(self.max_G, torch.abs(grad))
         self.V.add_(grad**2*(1.0-self.beta)/self.beta)
@@ -415,7 +615,7 @@ class SCALE_PF(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.count += 1
 
         metag = -grad * self.m
@@ -458,7 +658,7 @@ class ADAM(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
         self.V.mul_(self.beta2)
         eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
@@ -484,7 +684,7 @@ class ADAM_DA(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
         self.V.mul_(self.beta2)
         self.sum_G.add_((1.0-self.beta2) * grad / self.beta2)
@@ -512,7 +712,7 @@ class ORIG_ADAM(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
         self.V.mul_(self.beta2)
         self.m.add_((1.0-self.beta) * grad / self.beta)
@@ -537,7 +737,7 @@ class OPTIMISTIC_ADAM(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
         self.V.mul_(self.beta2)
         eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
@@ -566,7 +766,7 @@ class DynamicPF(OL_BASE):
 
 
     @torch.no_grad()
-    def update(self, grad):
+    def update(self, grad, *args, **kwargs):
         grad_norm_sq = (torch.linalg.norm(grad)**2).unsqueeze(-1)
         grad = grad.unsqueeze(-1)
         norms = torch.sqrt(einsum('... c, ... c -> c', self.iterates, self.iterates))
@@ -594,6 +794,8 @@ OL_REGISTRY = {
     'adamda': ADAM_DA,
     'scalepf': SCALE_PF,
     'scaleadam': SCALE_ADAM,
+    'scaleadamclip': SCALE_ADAM_CLIP,
+    'scaleadamclipglobal': SCALE_ADAM_CLIP_GLOBAL,
     'diagscaleadam': SCALE_ADAM_DIAG,
 }
 
@@ -636,6 +838,8 @@ class RandomOL(torch.optim.Optimizer):
 
         total_reward = 0
 
+        inner_product = 0
+
         for group in self.param_groups:
             wd = group['wd']
             for param in group['params']:
@@ -645,13 +849,16 @@ class RandomOL(torch.optim.Optimizer):
                 grad.add_(wd * param)
                 
                 state = self.state[param]
-                state['reward'].add_(torch.sum(state['ol'].get_iterate() * grad))
+                current_product = -torch.sum(state['ol'].get_iterate() * grad)
+                inner_product += current_product
+                state['reward'].add_(current_product)
                 total_reward += state['reward']
-        self.logger.log({
-            'optimizer/total_reward': total_reward
-        }, commit=False)
-
-
+        if self.count % 100 == 0:
+            self.logger.log({
+                'optimizer/total_reward': total_reward,
+                'optimizer/current_correlation': inner_product,
+            }, commit=False)
+        local_states = {}
         for group in self.param_groups:
             wd = group['wd']
             for param in group['params']:
@@ -663,11 +870,26 @@ class RandomOL(torch.optim.Optimizer):
 
                 state = self.state[param]
 
-                state['ol'].update(grad)
+                local_states[param] = state['ol'].update(grad, inner_product)
+            
+        logging_info = {}
+        for group in self.param_groups:
+            for param in group['params']:
+                if param.grad is None:
+                    continue
+                grad = param.grad
+                state = self.state[param]
+
+                state['ol'].global_update(param, grad, local_states)
+
                 delta = state['ol'].get_iterate()
+                logging_info = state['ol'].get_logging_info(logging_info)
 
                 param.copy_(state['iterate'] + scaling * delta)
                 state['iterate'].add_(delta)
+
+        if logging_info is not None and self.count % 100 == 0:
+            self.logger.log(logging_info, commit=False)
 
 
 
