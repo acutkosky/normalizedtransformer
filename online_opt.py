@@ -18,7 +18,7 @@ class OL_BASE(object):
     
     def update(self, grad, *args, **kwargs):
         raise NotImplementedError
-    def get_logging_info(self, logging_info):
+    def get_logging_info(self, param, grad, local_states, logging_info):
         return None
     
     def global_update(self, param, grad, local_states):
@@ -174,6 +174,31 @@ class SCALE_ADAM_CLIP(OL_BASE):
 #############
 
 
+class ORIG_ADAM(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+        eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
+        self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+
 
 class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
     def __init__(self, initial_value, **kwargs):
@@ -183,6 +208,7 @@ class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
         self.wd = kwargs['wd']
         self.beta2 = kwargs['beta2']
         self.beta = kwargs['beta']
+        self.beta3 = kwargs['beta3']
         self.V = torch.zeros_like(initial_value)
         self.m = torch.zeros_like(initial_value)
         self.iterate = initial_value.clone().detach_()
@@ -202,8 +228,11 @@ class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
         metag = -torch.sum(grad * self.m * torch.rsqrt(self.V + SMALL_VALUE))
         return metag
 
-    def get_logging_info(self, logging_info):
-        return {'optimizer/learned_lr': self.scaling}
+    def get_logging_info(self, param, grad, local_states, logging_info):
+        metag = 0
+        for k, v in local_states.items():
+            metag += v
+        return {'optimizer/learned_lr': self.scaling, 'optimizer/meta_gradient': metag}
 
 
     @torch.no_grad()
@@ -230,7 +259,7 @@ class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
         # self.m.mul_(self.beta)
         # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
         
-        self.scale_V.mul_(self.beta2)
+        self.scale_V.mul_(self.beta3)
         self.scale_V.add_(metag**2)
         
 
@@ -695,30 +724,30 @@ class ADAM_DA(OL_BASE):
         # self.iterate.mul_(self.beta)
 
 
-class ORIG_ADAM(OL_BASE):
-    def __init__(self, initial_value, **kwargs):
-        super().__init__(name='adam')
-        self.iterate = initial_value
-        self.lr = kwargs['lr']
-        self.wd = kwargs['wd']
-        self.beta2 = kwargs['beta2']
-        self.beta = kwargs['beta']
-        self.V = torch.zeros_like(initial_value)
-        self.m = torch.zeros_like(initial_value)
-        self.iterate = initial_value.clone().detach_()
+# class ORIG_ADAM(OL_BASE):
+#     def __init__(self, initial_value, **kwargs):
+#         super().__init__(name='adam')
+#         self.iterate = initial_value
+#         self.lr = kwargs['lr']
+#         self.wd = kwargs['wd']
+#         self.beta2 = kwargs['beta2']
+#         self.beta = kwargs['beta']
+#         self.V = torch.zeros_like(initial_value)
+#         self.m = torch.zeros_like(initial_value)
+#         self.iterate = initial_value.clone().detach_()
 
-    def get_iterate(self):
-        return self.iterate
+#     def get_iterate(self):
+#         return self.iterate
 
 
-    @torch.no_grad()
-    def update(self, grad, *args, **kwargs):
-        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
-        self.V.mul_(self.beta2)
-        self.m.add_((1.0-self.beta) * grad / self.beta)
-        self.m.mul_(self.beta)
-        eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
-        self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+#     @torch.no_grad()
+#     def update(self, grad, *args, **kwargs):
+#         self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+#         self.V.mul_(self.beta2)
+#         self.m.add_((1.0-self.beta) * grad / self.beta)
+#         self.m.mul_(self.beta)
+#         eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
+#         self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
 
 
 class OPTIMISTIC_ADAM(OL_BASE):
@@ -824,7 +853,53 @@ class RandomOL(torch.optim.Optimizer):
                 state = self.state[param]
                 state['ol'] = OL_REGISTRY[self.ol](torch.zeros_like(param), **group)
                 state['iterate'] = torch.clone(param).detach_()
+                state['prev_iterate'] = torch.clone(param).detach_()
                 state['reward'] = torch.zeros(1, device=param.device)
+
+    @torch.no_grad()
+    def swapstate(self):
+        for group in self.param_groups:
+            for param in group['params']:
+                state = self.state[param]
+                current_value = torch.clone(param)
+                param.copy_(state['iterate'])
+                state['iterate'].copy_(current_value)
+
+    @torch.no_grad()
+    def swap_prev_state(self):
+        for group in self.param_groups:
+            for param in group['params']:
+                state = self.state[param]
+                current_value = torch.clone(param)
+                param.copy_(state['prev_iterate'])
+                state['prev_iterate'].copy_(current_value)
+
+    @torch.no_grad()
+    def resample(self):
+        if self.scale_type == 'random':
+            scaling = random.random()
+            for group in self.param_groups:
+                for param in group['params']:
+                    state = self.state[param]
+                    delta = state['ol'].get_iterate()
+                    param.copy_(state['prev_iterate'] + scaling * delta)
+
+    def get_inner_product(self):
+        per_param_products = {}
+        inner_product = 0
+        for group in self.param_groups:
+            wd = group['wd']
+            for param in group['params']:
+                if param.grad is None:
+                    continue
+                grad = param.grad
+                grad += wd * param
+                
+                state = self.state[param]
+                current_product = -torch.sum(state['ol'].get_iterate() * grad)
+                inner_product += current_product
+                per_param_products[param] = current_product
+        return inner_product, per_param_products
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -838,21 +913,17 @@ class RandomOL(torch.optim.Optimizer):
 
         total_reward = 0
 
-        inner_product = 0
+        inner_product, per_param_products = self.get_inner_product()
 
         for group in self.param_groups:
             wd = group['wd']
             for param in group['params']:
                 if param.grad is None:
                     continue
-                grad = param.grad
-                grad.add_(wd * param)
-                
                 state = self.state[param]
-                current_product = -torch.sum(state['ol'].get_iterate() * grad)
-                inner_product += current_product
-                state['reward'].add_(current_product)
+                state['reward'].add_(per_param_products[param])
                 total_reward += state['reward']
+
         if self.count % 100 == 0:
             self.logger.log({
                 'optimizer/total_reward': total_reward,
@@ -866,6 +937,7 @@ class RandomOL(torch.optim.Optimizer):
                     continue
 
                 grad = param.grad
+                grad.add_(wd * param)
 
 
                 state = self.state[param]
@@ -883,13 +955,16 @@ class RandomOL(torch.optim.Optimizer):
                 state['ol'].global_update(param, grad, local_states)
 
                 delta = state['ol'].get_iterate()
-                logging_info = state['ol'].get_logging_info(logging_info)
+                logging_info = state['ol'].get_logging_info(param, grad, local_states, logging_info)
 
                 param.copy_(state['iterate'] + scaling * delta)
+                state['prev_iterate'].copy_(state['iterate'])
                 state['iterate'].add_(delta)
 
         if logging_info is not None and self.count % 100 == 0:
             self.logger.log(logging_info, commit=False)
+        
+        return 
 
 
 

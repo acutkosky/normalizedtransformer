@@ -82,6 +82,7 @@ class ResidualSelfAttention(torch.nn.Module):
             y = self.diagnorm(x)
         y = self.ln(x)
         y = self.selfattention(y)
+        y 
         y = x + y#*self.scaling#*(1-self.residual_weight) + self.residual_weight*y
         return y
 
@@ -105,7 +106,7 @@ class StackedAttention(torch.nn.Module):
         # print(targets)
         return targets
 
-    def forward(self, idx, mask, compute_loss=True):
+    def forward(self, idx, mask, labels, compute_loss=True):
         """
         idx is 1-hot encoding integer tensor shape [B, T] entries are indices into vocab
         targets is 1-hot encoding integer tensor shape [B, T], entries are indices into vocab for labels.
@@ -130,12 +131,15 @@ class StackedAttention(torch.nn.Module):
 
         logits = self.head(features) # shape [B, T, V]
 
+        # targets = labels[:, :T]#
         targets = StackedAttention.get_targets(mask, idx, T)
 
         # cross entropy loss doesn't know about T, so we flatten the time dimension:
         # print("logits: ", logits.shape)
         # print("targets: ", targets.shape)
+        
         logits_for_CE = logits.reshape(-1, logits.size(-1)) # shape [BT, V]
+        # print(f"logits for ce shape: {logits_for_CE.size()}, original logits shape: {logits.size()}, targets shape: {targets.size()}")
         targets_for_CE = targets.reshape(-1) # shape [BT]
 
         with torch.no_grad():

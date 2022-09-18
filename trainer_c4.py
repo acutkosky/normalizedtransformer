@@ -75,7 +75,7 @@ def train(model, config, device):
     print(config)
     tokenizer = transformers.GPT2TokenizerFast.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
-    if config.opt == 'adamw':
+    if config.opt == 'adamw' or config.opt == 'adamw_warmup':
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.wd, betas=(config.beta, config.beta2))
     elif config.opt == 'perpopt':
         optimizer = perpopt.PerpOpt(model.parameters(), lr=config.lr, wd=config.wd, beta=config.beta, alignbeta=1.0)
@@ -96,7 +96,7 @@ def train(model, config, device):
     elif config.opt == 'random':
         optimizer = nigt.RandomSGDM(model.parameters(), lr=config.lr, wd=config.wd, beta=config.beta, scale_type=config.scale_type)
     elif config.opt == 'randomol':
-        optimizer = online_opt.RandomOL(model.parameters(), lr=config.lr, wd=config.wd, scale_type=config.scale_type, ol=config.ol, beta=config.beta ,beta2=config.beta2, logger=wandb)
+        optimizer = online_opt.RandomOL(model.parameters(), lr=config.lr, wd=config.wd, scale_type=config.scale_type, ol=config.ol, beta=config.beta ,beta2=config.beta2, beta3=config.beta3, logger=wandb)
     elif config.opt == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, momentum=config.beta, dampening=config.beta)
     losses = []
@@ -111,6 +111,8 @@ def train(model, config, device):
     else:
         test_loader = None
         test_iter = None
+    tokens = 0
+    total_difference = 0
     for epoch in range(config.epochs):
         if config.dataset == 'wikitext':
             train_loader = load_train_data(config, tokenizer)
@@ -129,11 +131,37 @@ def train(model, config, device):
             # encoded = tokenizer(strings, padding=True, truncation=True, return_tensors='pt', max_length=model.config.context_length)
             idx = strings['input_ids'].to(device)
             mask = strings['attention_mask'].to(device)
-            
-            model.zero_grad()
-            features, loss, accuracy = model(idx, mask)
-            loss.backward()
+            labels = strings['labels'].to(device)
+
+
+            def closure():
+                model.zero_grad()
+                features, loss, accuracy = model(idx, mask, labels)
+                loss.backward()
+                return features, loss, accuracy
+
+            def inference_closure():
+                with torch.no_grad():
+                    features, loss, accuracy = model(idx, mask, labels)
+                return features, loss, accuracy
+
+            if config.log_differences:
+                optimizer.swap_prev_state()
+                features, prev_loss, accuracy = inference_closure()
+                optimizer.swap_prev_state() 
+
+
+                optimizer.swapstate()
+                features, cur_loss, accuracy = inference_closure()
+                optimizer.swapstate
+
+                difference = prev_loss - cur_loss
+                total_difference += difference
+
+            features, loss, accuracy = closure()
+
             optimizer.step()
+            tokens += (mask >= 0).sum()
 
 
             current_time = time.monotonic()
@@ -146,14 +174,29 @@ def train(model, config, device):
 
             # losses.append(loss.item())
             iterations += 1
+
+            if config.opt == 'adamw_warmup':
+                lr = config.lr * min(1, float(iterations) / float(max(1, config.warmup_steps)))
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
+                if iterations % 100 == 0:
+                    wandb.log({
+                        'optimizer/learned_lr': lr
+                    },
+                    step = iterations)
+
+
             if iterations % 100 == 0:
-                wandb.log({
+                log_dict = {
                     "epoch": epoch,
                     "train/loss": loss.item(),
                     "train/accuracy": accuracy.item(),
-                    "it_per_second": 1.0/delta_time
-                },
-                step = iterations)
+                    "it_per_second": 1.0/delta_time,
+                }
+                if config.log_differences:
+                    log_dict["optimizer/loss_difference"] = difference
+                    log_dict["optimizer/total_loss_difference"] = total_difference
+                wandb.log(log_dict, step = iterations)
             pbar.set_description(f"train epoch {epoch+1} iter {t}: current loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
 
             for _ in range(config.ministeps-1):
@@ -172,7 +215,11 @@ def train(model, config, device):
         print("testing:")
         if config.opt == 'nigt' and config.recenter:
             optimizer.x_to_w_()
+        if config.opt == 'randomol' and config.swapol:
+            optimizer.swapstate()
         _, finished = test(model, config, device, epoch, iterations, test_iter)
+        if config.opt == 'randomol' and config.swapol:
+            optimizer.swapstate()
         if not finished and conf.dataset == 'c4':
             test_loader = load_test_data(config, tokenizer)
             test_iter = enumerate(test_loader)
@@ -229,9 +276,11 @@ def test(model, config, device, epoch, iterations, test_iter=None):
         # encoded = tokenizer(strings, padding=True, truncation=True, return_tensors='pt', max_length=model.config.context_length)
         idx = strings['input_ids'].to(device)
         mask = strings['attention_mask'].to(device)
+        labels = strings['labels'].to(device)
         cur_run_it += 1
         
-        features, loss, accuracy = model(idx, mask)
+        with torch.no_grad():
+            features, loss, accuracy = model(idx, mask, labels)
 
 
         current_time = time.monotonic()
