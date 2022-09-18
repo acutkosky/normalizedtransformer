@@ -153,7 +153,7 @@ def train(model, config, device):
 
                 optimizer.swapstate()
                 features, cur_loss, accuracy = inference_closure()
-                optimizer.swapstate
+                optimizer.swapstate()
 
                 difference = prev_loss - cur_loss
                 total_difference += difference
