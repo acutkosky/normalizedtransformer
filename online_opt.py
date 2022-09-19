@@ -899,7 +899,7 @@ OL_REGISTRY = {
     'scaleadam': SCALE_ADAM,
     'scaleadamclip': SCALE_ADAM_CLIP,
     'scaleadamclipglobal': SCALE_ADAM_CLIP_GLOBAL,
-    'scaleatruedamclipglobal': SCALE_TRUE_ADAM_CLIP_GLOBAL,
+    'scaletrueadamclipglobal': SCALE_TRUE_ADAM_CLIP_GLOBAL,
     'diagscaleadam': SCALE_ADAM_DIAG,
 }
 
