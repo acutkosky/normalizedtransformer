@@ -276,6 +276,80 @@ class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
 
 
 
+class SCALE_TRUE_ADAM_CLIP_GLOBAL(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.beta3 = kwargs['beta3']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+        self.scaling = torch.ones(1, device=initial_value.device) * self.lr
+        self.scale_V = torch.zeros(1, device=initial_value.device)
+        self.scale_eta = self.lr
+        self.count = 0
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+
+        # metag = torch.sum(grad * self.iterate)/self.scaling
+        metag = -torch.sum(grad * self.m * torch.rsqrt(self.V + SMALL_VALUE))
+        return metag
+
+    def get_logging_info(self, param, grad, local_states, logging_info):
+        metag = 0
+        for k, v in local_states.items():
+            metag += v
+        return {'optimizer/learned_lr': self.scaling, 'optimizer/meta_gradient': metag}
+
+
+    @torch.no_grad()
+    def global_update(self, param, grad, local_states):
+        metag = 0
+        for k, v in local_states.items():
+            metag += v
+        # assert torch.abs(metag_p- metag)<0.001, f"uh oh: {metag_p}, {metag}"
+
+
+        self.count += 1
+
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+
+        V = self.V/(1.0-self.beta2**self.count)
+        m = self.m/(1.0-self.beta**self.count)
+
+        # self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        # self.V.mul_(self.beta2)
+        # self.m.add_((1.0-self.beta) * grad / self.beta)
+        # self.m.mul_(self.beta)
+        # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+        
+        self.scale_V.mul_(self.beta3)
+        self.scale_V.add_(metag**2)
+        
+
+        self.scaling.mul_(torch.exp(-metag * torch.rsqrt(self.scale_V+SMALL_VALUE) - metag**2 /(self.scale_V + SMALL_VALUE)))
+        self.scaling.clamp_(1e-10, 0.1)
+        # logger.log({
+        #     'optimizer/iterate': self.scaling,
+        # },
+        # commit=False)
+        # eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
+        self.iterate.copy_(-self.scaling* m * torch.rsqrt(V + SMALL_VALUE))
+#############
+
+
 
 
 class SCALE_ADAM_MANYLR(OL_BASE):
@@ -825,6 +899,7 @@ OL_REGISTRY = {
     'scaleadam': SCALE_ADAM,
     'scaleadamclip': SCALE_ADAM_CLIP,
     'scaleadamclipglobal': SCALE_ADAM_CLIP_GLOBAL,
+    'scaleatruedamclipglobal': SCALE_TRUE_ADAM_CLIP_GLOBAL,
     'diagscaleadam': SCALE_ADAM_DIAG,
 }
 
@@ -842,6 +917,7 @@ class RandomOL(torch.optim.Optimizer):
         self.ol = ol
         self.scale_type = scale_type
         self.logger = logger
+        self.total_reward_check = 0.0
 
         self.__setstate__(self.state)
 
@@ -914,6 +990,7 @@ class RandomOL(torch.optim.Optimizer):
         total_reward = 0
 
         inner_product, per_param_products = self.get_inner_product()
+        self.total_reward_check += inner_product
 
         for group in self.param_groups:
             wd = group['wd']
@@ -928,6 +1005,7 @@ class RandomOL(torch.optim.Optimizer):
             self.logger.log({
                 'optimizer/total_reward': total_reward,
                 'optimizer/current_correlation': inner_product,
+                'optimizer/total_reward_check': self.total_reward_check,
             }, commit=False)
         local_states = {}
         for group in self.param_groups:
@@ -964,7 +1042,7 @@ class RandomOL(torch.optim.Optimizer):
         if logging_info is not None and self.count % 100 == 0:
             self.logger.log(logging_info, commit=False)
         
-        return 
+        return total_reward
 
 
 

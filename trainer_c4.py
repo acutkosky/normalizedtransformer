@@ -145,7 +145,7 @@ def train(model, config, device):
                     features, loss, accuracy = model(idx, mask, labels)
                 return features, loss, accuracy
 
-            if config.log_differences:
+            if config.log_differences and config.opt == 'randomol':
                 optimizer.swap_prev_state()
                 features, prev_loss, accuracy = inference_closure()
                 optimizer.swap_prev_state() 
@@ -160,7 +160,7 @@ def train(model, config, device):
 
             features, loss, accuracy = closure()
 
-            optimizer.step()
+            total_reward = optimizer.step()
             tokens += (mask >= 0).sum()
 
 
@@ -193,9 +193,10 @@ def train(model, config, device):
                     "train/accuracy": accuracy.item(),
                     "it_per_second": 1.0/delta_time,
                 }
-                if config.log_differences:
+                if config.log_differences and config.opt == 'randomol':
                     log_dict["optimizer/loss_difference"] = difference
                     log_dict["optimizer/total_loss_difference"] = total_difference
+                    log_dict["optimizer/measured_minus_estimate"] = total_difference - total_reward
                 wandb.log(log_dict, step = iterations)
             pbar.set_description(f"train epoch {epoch+1} iter {t}: current loss {loss.item():.5f}, running loss {running_loss:0.5f}, running accuracy {running_accuracy:0.5f} speed {1.0/delta_time:0.5f}")
 

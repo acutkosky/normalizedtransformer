@@ -82,7 +82,6 @@ class ResidualSelfAttention(torch.nn.Module):
             y = self.diagnorm(x)
         y = self.ln(x)
         y = self.selfattention(y)
-        y 
         y = x + y#*self.scaling#*(1-self.residual_weight) + self.residual_weight*y
         return y
 
@@ -131,8 +130,8 @@ class StackedAttention(torch.nn.Module):
 
         logits = self.head(features) # shape [B, T, V]
 
-        # targets = labels[:, :T]#
-        targets = StackedAttention.get_targets(mask, idx, T)
+        targets = labels[:, :T]#
+        # targets = StackedAttention.get_targets(mask, idx, T)
 
         # cross entropy loss doesn't know about T, so we flatten the time dimension:
         # print("logits: ", logits.shape)
