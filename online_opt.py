@@ -253,8 +253,8 @@ class SCALE_ADAM_CLIP_GLOBAL_MANY_LR(OL_BASE):
     def update(self, grad, *args, **kwargs):
 
         if self.debias:
-            V = self.V/(1.0-self.beta2**self.count)
-            m = self.m/(1.0-self.beta**self.count)
+            V = self.V/(1.0-self.beta2**max(self.count, 1))
+            m = self.m/(1.0-self.beta**max(self.count, 1))
         else:
             V = self.V
             m = self.m
