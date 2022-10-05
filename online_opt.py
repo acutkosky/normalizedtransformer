@@ -179,6 +179,9 @@ class ORIG_ADAM(OL_BASE):
         super().__init__(name='adam')
         self.iterate = initial_value
         self.lr = kwargs['lr']
+        self.current_lr = self.lr
+        self.iterations = 0
+        self.warmup_steps = kwargs['warmup_steps']
         self.wd = kwargs['wd']
         self.beta2 = kwargs['beta2']
         self.beta = kwargs['beta']
@@ -190,6 +193,10 @@ class ORIG_ADAM(OL_BASE):
         return self.iterate
 
 
+    def get_logging_info(self, param, grad, local_states, logging_info):
+        return {'optimizer/learned_lr': self.current_lr}
+
+
     @torch.no_grad()
     def update(self, grad, *args, **kwargs):
         self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
@@ -197,8 +204,170 @@ class ORIG_ADAM(OL_BASE):
         self.m.add_((1.0-self.beta) * grad / self.beta)
         self.m.mul_(self.beta)
         eta = self.lr * torch.rsqrt(self.V + SMALL_VALUE)
-        self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+        self.iterations += 1
+        self.current_lr = self.lr * min(1, float(self.iterations) / float(max(1, self.warmup_steps)))
+        self.iterate.copy_(-self.current_lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
 
+class EXP_MD_MANY_LR(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='exp_md_many_lr')
+        self.iterate = initial_value
+        self.eta_list = torch.tensor([5.0**k for k in range(-12,2)], device=initial_value.device)
+        self.minimum_values = torch.tensor([5.0**-14 for k in range(-12,2)], device=initial_value.device)
+        self.maximum_values = torch.tensor([0.1 for k in range(-12, 2)], device=initial_value.device)
+
+        self.param_values = torch.tensor([5.0**-12 for k in range(-12,2)], device=initial_value.device)
+
+    def get_iterate(self):
+        return torch.sum(self.param_values)
+
+    def update(self, grad, *args, **kwargs):
+        self.param_values.mul_(torch.exp(-grad * self.eta_list - grad**2 * self.eta_list**2))
+        self.param_values.clamp_(self.minimum_values, self.maximum_values)
+
+
+
+
+
+class SCALE_ADAM_CLIP_GLOBAL_MANY_LR(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.beta3 = kwargs['beta3']
+        self.debias = kwargs['debias']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+        self.scale_learner = EXP_MD_MANY_LR(initial_value)
+        self.count = 0
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+
+        if self.debias:
+            V = self.V/(1.0-self.beta2**self.count)
+            m = self.m/(1.0-self.beta**self.count)
+        else:
+            V = self.V
+            m = self.m
+        # metag = torch.sum(grad * self.iterate)/self.scaling
+        metag = -torch.sum(grad * m * torch.rsqrt(V + SMALL_VALUE))
+        return metag
+
+    def get_logging_info(self, param, grad, local_states, logging_info):
+        metag = 0
+        for k, v in local_states.items():
+            metag += v
+        return {'optimizer/learned_lr': self.scaling, 'optimizer/meta_gradient': metag}
+
+
+    @torch.no_grad()
+    def global_update(self, param, grad, local_states):
+        metag = 0
+        for k, v in local_states.items():
+            metag += v
+        # assert torch.abs(metag_p- metag)<0.001, f"uh oh: {metag_p}, {metag}"
+
+
+        self.count += 1
+
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+
+        if self.debias:
+            V = self.V/(1.0-self.beta2**self.count)
+            m = self.m/(1.0-self.beta**self.count)
+        else:
+            V = self.V
+            m = self.m
+
+        # self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        # self.V.mul_(self.beta2)
+        # self.m.add_((1.0-self.beta) * grad / self.beta)
+        # self.m.mul_(self.beta)
+        # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+
+        self.scale_learner.update(metag)
+        self.scaling = self.scale_learner.get_iterate()
+
+        
+        self.iterate.copy_(-self.scaling* m * torch.rsqrt(V + SMALL_VALUE))
+#############
+
+
+class SCALE_ADAM_CLIP_LOCAL_MANY_LR(OL_BASE):
+    def __init__(self, initial_value, **kwargs):
+        super().__init__(name='adam')
+        self.iterate = initial_value
+        self.lr = kwargs['lr']
+        self.wd = kwargs['wd']
+        self.beta2 = kwargs['beta2']
+        self.beta = kwargs['beta']
+        self.beta3 = kwargs['beta3']
+        self.V = torch.zeros_like(initial_value)
+        self.m = torch.zeros_like(initial_value)
+        self.iterate = initial_value.clone().detach_()
+        self.scale_learner = EXP_MD_MANY_LR(initial_value)
+        self.count = 0
+
+    def get_iterate(self):
+        return self.iterate
+
+
+    @torch.no_grad()
+    def update(self, grad, *args, **kwargs):
+
+        # metag = torch.sum(grad * self.iterate)/self.scaling
+
+        if self.debias:
+            V = self.V/(1.0-self.beta2**self.count)
+            m = self.m/(1.0-self.beta**self.count)
+        else:
+            V = self.V
+            m = self.m
+        metag = -torch.sum(grad * m * torch.rsqrt(V + SMALL_VALUE))
+
+
+        self.count += 1
+
+        self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        self.V.mul_(self.beta2)
+        self.m.add_((1.0-self.beta) * grad / self.beta)
+        self.m.mul_(self.beta)
+
+
+        if self.debias:
+            V = self.V/(1.0-self.beta2**self.count)
+            m = self.m/(1.0-self.beta**self.count)
+        else:
+            V = self.V
+            m = self.m
+        # V = self.V#/(1.0-self.beta2**self.count)
+        # m = self.m#/(1.0-self.beta**self.count)
+
+        # self.V.add_((1.0-self.beta2) * grad**2 / self.beta2)
+        # self.V.mul_(self.beta2)
+        # self.m.add_((1.0-self.beta) * grad / self.beta)
+        # self.m.mul_(self.beta)
+        # self.iterate.copy_(-self.lr * self.m *torch.rsqrt(self.V + SMALL_VALUE))
+
+        self.scale_learner.update(metag)
+        self.scaling = self.scale_learner.get_iterate()
+
+        
+        self.iterate.copy_(-self.scaling* m * torch.rsqrt(V + SMALL_VALUE))
+
+#############
 
 class SCALE_ADAM_CLIP_GLOBAL(OL_BASE):
     def __init__(self, initial_value, **kwargs):
@@ -900,6 +1069,8 @@ OL_REGISTRY = {
     'scaleadamclip': SCALE_ADAM_CLIP,
     'scaleadamclipglobal': SCALE_ADAM_CLIP_GLOBAL,
     'scaletrueadamclipglobal': SCALE_TRUE_ADAM_CLIP_GLOBAL,
+    'scaleadamclipglobalmanylr': SCALE_ADAM_CLIP_GLOBAL_MANY_LR,
+    'scaleadamcliplocalmanylr': SCALE_ADAM_CLIP_LOCAL_MANY_LR,
     'diagscaleadam': SCALE_ADAM_DIAG,
 }
 

@@ -96,12 +96,14 @@ def train(model, config, device):
     elif config.opt == 'random':
         optimizer = nigt.RandomSGDM(model.parameters(), lr=config.lr, wd=config.wd, beta=config.beta, scale_type=config.scale_type)
     elif config.opt == 'randomol':
-        optimizer = online_opt.RandomOL(model.parameters(), lr=config.lr, wd=config.wd, scale_type=config.scale_type, ol=config.ol, beta=config.beta ,beta2=config.beta2, beta3=config.beta3, logger=wandb)
+        optimizer = online_opt.RandomOL(model.parameters(), lr=config.lr, wd=config.wd, scale_type=config.scale_type, ol=config.ol, beta=config.beta ,beta2=config.beta2,
+                                        beta3=config.beta3, warmup_steps=config.warmup_steps, debias=config.debias, logger=wandb)
     elif config.opt == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, momentum=config.beta, dampening=config.beta)
     losses = []
 
     iterations = 0
+    examples = 0
     train_loader = load_train_data(config, tokenizer)
     train_iter = enumerate(train_loader)
     total = config.valid_frequency/config.batch_size
@@ -174,6 +176,7 @@ def train(model, config, device):
 
             # losses.append(loss.item())
             iterations += 1
+            examples += idx.size()[0]
 
             if config.opt == 'adamw_warmup':
                 lr = config.lr * min(1, float(iterations) / float(max(1, config.warmup_steps)))
@@ -192,6 +195,7 @@ def train(model, config, device):
                     "train/loss": loss.item(),
                     "train/accuracy": accuracy.item(),
                     "it_per_second": 1.0/delta_time,
+                    "examples": examples,
                 }
                 if config.log_differences and config.opt == 'randomol':
                     log_dict["optimizer/loss_difference"] = difference
@@ -357,10 +361,13 @@ if __name__=='__main__':
     args = OmegaConf.create(vars(args))
     if args.config is not None:
         conf = OmegaConf.load(args.config)
+        conf.debias = conf.get('debias', True)
+
         args = OmegaConf.merge(args, conf)
+
     wandb = optional_module(wandb, args.logging)
-    wandb.init()
-    wandb.config.update(args)
+    wandb.init(project=args.project)
+    wandb.config.update(args._content)
     initialize_and_train_model(args)
 
 
